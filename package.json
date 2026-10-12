@@ -1,11 +1,15 @@
 {
   "name": "pet-kit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Shared room / transport / looks layer for pet HTML-work LAN games (pet.sessions).",
+  "description": "Shared room / transport / looks layer for invitation-based pet HTML games.",
   "license": "MIT",
   "main": "src/index.js",
   "scripts": {
-    "test": "node --test test/*.test.cjs"
+    "test": "node --test test/*.test.cjs",
+    "test:rooms": "node --test test/room.test.cjs",
+    "test:host": "node --test test/room-host.test.cjs",
+    "test:appearance": "node --test test/room-appearance.test.cjs",
+    "test:vendor": "node --test test/vendor.test.cjs"
   }
 }

@@ -11,6 +11,7 @@ function vendor(gameDir){
   const out=path.join(gameDir,'vendor/pet-kit');fs.rmSync(out,{recursive:true,force:true});fs.mkdirSync(out,{recursive:true});
   const files={};
   for(const f of fs.readdirSync(path.join(kit,'src')).filter(f=>f.endsWith('.js'))){const b=fs.readFileSync(path.join(kit,'src',f));fs.writeFileSync(path.join(out,f),b);files[f]=crypto.createHash('sha256').update(b).digest('hex');}
+  const verifier=fs.readFileSync(__filename);fs.writeFileSync(path.join(out,'verify.cjs'),verifier);files['verify.cjs']=crypto.createHash('sha256').update(verifier).digest('hex');
   fs.copyFileSync(path.join(kit,'LICENSE'),path.join(out,'LICENSE'));
   // The strict fake host, for the game's own net tests (not bundled into the HTML).
   fs.mkdirSync(path.join(out,'testing'));fs.copyFileSync(path.join(kit,'test/fake-sessions.cjs'),path.join(out,'testing/fake-sessions.cjs'));
@@ -20,7 +21,7 @@ function vendor(gameDir){
 function check(gameDir){
   const bad=[];
   const walk=d=>{for(const e of fs.readdirSync(d,{withFileTypes:true})){const p=path.join(d,e.name);if(e.isDirectory()){if(!['vendor','node_modules','dist','artifacts','.git'].includes(e.name))walk(p);}
-    else if(/\.(c?js|mjs)$/.test(e.name)){const src=fs.readFileSync(p,'utf8');for(const m of src.matchAll(/(?:require\(|from\s+)['"]([^'"]*pet-kit[^'"]*)['"]/g))if(!/pet-kit\/((index|looks)(\.js)?|testing\/fake-sessions\.cjs)$/.test(m[1]))bad.push(path.relative(gameDir,p)+' → '+m[1]);}}};
+    else if(/\.(c?js|mjs)$/.test(e.name)){const src=fs.readFileSync(p,'utf8');for(const m of src.matchAll(/(?:require\(|from\s+)['"]([^'"]*pet-kit[^'"]*)['"]/g))if(!/pet-kit\/((index|looks)(\.js)?|verify\.cjs|testing\/fake-sessions\.cjs)$/.test(m[1]))bad.push(path.relative(gameDir,p)+' → '+m[1]);}}};
   walk(gameDir);
   if(bad.length)throw Error('pet-kit internals imported (use vendor/pet-kit/index.js or looks.js):\n  '+bad.join('\n  '));
   const v=JSON.parse(fs.readFileSync(path.join(gameDir,'vendor/pet-kit/VERSION.json'),'utf8'));

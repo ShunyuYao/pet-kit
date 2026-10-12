@@ -2,7 +2,7 @@
 // pet-kit room: the part of a LAN game that is the same in every game.
 //
 //   seats · lobby · ready · host settings · a reliable-over-latest event channel · the game's own
-//   state stream (compressed) · host clock · avatar exchange (lobby only) · leave / close ·
+//   state stream (compressed) · host clock · avatar exchange (lobby by default) · leave / close ·
 //   send budgets · measurements (bytes per guest, state age, rtt)
 //
 // What stays in the game: what the state contains, who is authoritative for what, what the
@@ -17,7 +17,7 @@
 //                                              host → guest kit.pong · kit.st
 const Wire=require('./wire.js');
 
-const VERSION='0.1.0';
+const VERSION='0.2.0';
 const T={hello:'kit.hello',ping:'kit.ping',pong:'kit.pong',up:'kit.up',st:'kit.st'};
 const HELLO_MS=1000,STALE_MS=3000,POLL_GAP=40,LOBBY_EVERY_MS=1000,CALLS_SOFT=25,BYTES_SOFT=480*1024; // host limits: 30 calls/lane and 512 KB per session per second
 const MAX_EVENTS=200,MAX_EVENT_CHARS=24000,LOG_CAP=4000,AGE_SAMPLES=240;
@@ -26,7 +26,7 @@ const TRANSIENT=/backpressure|quota_exceeded|peer_offline|not_connected|session_
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 const KINDS=['doll3d','sprite','toy'];
 function cleanProfile(p){
-  if(!p||typeof p!=='object'||typeof p.signature!=='string'||!p.signature||p.signature.length>200)throw Error('invalid_profile');
+  if(!p||typeof p!=='object'||typeof p.signature!=='string'||!p.signature||p.signature.length>256)throw Error('invalid_profile');
   return {name:[...String(p.name||'玩家').replace(/[\u0000-\u001f\u202a-\u202e\u2066-\u2069]/g,'')].slice(0,16).join('')||'玩家',signature:p.signature,kind:KINDS.includes(p.kind)?p.kind:'toy'};
 }
 const pct=(arr,q)=>{if(!arr.length)return null;const s=arr.slice().sort((a,b)=>a-b);return s[Math.min(s.length-1,Math.floor(q*s.length))];};
@@ -34,22 +34,23 @@ const encodeAsset=v=>Wire.toB64(new TextEncoder().encode(JSON.stringify(v)));
 const decodeAsset=s=>{if(typeof s!=='string'||s.length>MAX_ASSET_B64)throw Error('invalid_asset');return JSON.parse(new TextDecoder().decode(Wire.fromB64(s)));};
 
 function create(sdk,opts={}){
-  const {protocol,purpose='kit.look.v1',maxPlayers=4,now=()=>Date.now(),strict=false,compress=true,
+  const {protocol,purpose='kit.look.v1',maxPlayers=4,appearancePolicy='lobby',now=()=>Date.now(),strict=false,compress=true,
     rates={match:20,lobby:5,up:20},budget={guestBytesPerSec:null},
     prefs:prefsSpec={defaults:{},validate:v=>v||{}},settings:settingsSpec={defaults:{},validate:v=>v||{}},
     hostState=()=>null,guestState=()=>null,
     onState=()=>{},onEvent=()=>{},onLobby=()=>{},onAsset=()=>{},onPeerLeft=()=>{},onConnection=()=>{},onClosed=()=>{},onError=()=>{},onBudget=()=>{}}=opts;
   if(!protocol||typeof protocol.id!=='string')throw Error('protocol_required');
-  let context=null,host=false,connection='waiting',closed=false,disposed=false,closeReason='',cursor=0,epoch=0;
+  if(!['lobby','continuous'].includes(appearancePolicy))throw Error('invalid_appearance_policy');
+  let context=null,host=false,connection='waiting',closed=false,disposed=false,closeReason='',cursor=0,epoch=0,pairSession=false;
   let profile=null,asset=null,myPrefs=prefsSpec.validate({...prefsSpec.defaults}),ready=false,settings=settingsSpec.validate({...settingsSpec.defaults}),inMatch=false;
   const timers=[],recent=[];
   const note=(type,reason)=>{recent.push({t:Math.round(now()),type,reason});if(recent.length>40)recent.shift();};
-  const fail=e=>{note('error',e?.message||String(e));try{onError(e instanceof Error?e:Error(String(e)));}catch{}};
-  const status=s=>{if(connection!==s){connection=s;onConnection(s);}};
+  const fail=e=>{if(disposed)return;note('error',e?.message||String(e));try{onError(e instanceof Error?e:Error(String(e)));}catch{}};
+  const status=s=>{if(!disposed&&connection!==s){connection=s;onConnection(s);}};
 
   // ---------- sending: plain JSON, per-destination call count, bytes metering ----------
   // State / event traffic per destination. Look transfers are counted apart (lookBytes): they
-  // happen in the lobby only and are not part of the per-guest state budget.
+  // follow appearancePolicy and are not part of the per-guest state budget.
   const meters=new Map(); // destination slot → {calls:[t...], bytes:[[t,n]...]}
   let lookBytes=0;
   const meter=slot=>{let m=meters.get(slot);if(!m){m={calls:[],bytes:[]};meters.set(slot,m);}return m;};
@@ -61,7 +62,7 @@ function create(sdk,opts={}){
   async function send(type,payload,key,to,slots){
     if(closed||disposed)throw Error('session_closed');
     const clean=Wire.plain(payload,{strict,label:type});const bytes=Wire.bytesOf(clean);
-    try{const r=await sdk.send({...(to?{to}:{}),type,payload:clean,lane:'latest',key});for(const s of slots)spend(s,bytes);return r;}
+    try{const r=await sdk.send({...(!pairSession&&to?{to}:{}),type,payload:clean,lane:'latest',key});for(const s of slots)spend(s,bytes);return r;}
     catch(e){note('send_error',type+': '+e.message);throw e;}
   }
 
@@ -83,17 +84,20 @@ function create(sdk,opts={}){
   const peers=new Map(); // sessionPeerId → peer
   let lobbySerial=0,lastSt=0,lastLobbySent=0,sentSerial=-1,sendingSt=false,uploading=false,uploadAfter=0;
   const payloads=new Map(); // signature → base64 look
-  function peer(id){let p=peers.get(id);if(!p){p={id,slot:null,online:true,lastHeard:now(),profile:null,prefs:prefsSpec.validate({...prefsSpec.defaults}),ready:false,have:new Set(),sent:new Set(),pending:null,lastQ:0,gack:0,waiting:false,told:false,full:false};peers.set(id,p);}return p;}
+  function peer(id){let p=peers.get(id);if(!p){p={id,slot:null,online:true,lastHeard:now(),profile:null,prefs:prefsSpec.validate({...prefsSpec.defaults}),ready:false,have:new Set(),sent:new Set(),announced:new Set(),received:new Set(),pending:null,lastQ:0,gack:0,waiting:false,told:false,full:false};peers.set(id,p);}return p;}
   const seated=()=>[...peers.values()].filter(p=>p.slot!==null&&p.profile);
   function hostLobby(){
     const me={slot:0,name:profile.name,signature:profile.signature,kind:profile.kind,prefs:myPrefs,ready,online:true,waiting:false};
     const list=[me,...seated().map(p=>({slot:p.slot,name:p.profile.name,signature:p.profile.signature,kind:p.profile.kind,prefs:p.prefs,ready:p.ready,online:p.online,waiting:p.waiting}))];
     return {players:list.sort((a,b)=>a.slot-b.slot),settings,inMatch,serial:lobbySerial,looks:[...payloads.keys()].slice(0,8)};
   }
-  const changed=()=>{lobbySerial++;try{onLobby(api.lobby());}catch(e){fail(e);}};
+  const changed=()=>{if(disposed||closed)return;lobbySerial++;try{onLobby(api.lobby());}catch(e){fail(e);}};
   function freeSlot(){const taken=new Set([...peers.values()].map(p=>p.slot));for(let n=1;n<maxPlayers;n++)if(!taken.has(n))return n;return null;}
   function acceptPending(p){
-    const v=p.pending;if(!v||p.profile?.signature!==v.signature)return;p.pending=null;
+    const v=p.pending;if(!v||(p.profile?.signature!==v.signature&&!(appearancePolicy==='continuous'&&p.announced.has(v.signature))))return;p.pending=null;
+    // A slow transfer can finish after a newer hello. Cache a previously declared
+    // look without making it current, so returning to its signature needs no resend.
+    if(p.received.has(v.signature))return;p.received.add(v.signature);
     payloads.set(v.signature,v.data);for(const q of peers.values())if(q!==p)q.sent.delete(v.signature);
     try{onAsset(v.signature,v.asset,p.slot);}catch(e){fail(e);}
   }
@@ -103,7 +107,7 @@ function create(sdk,opts={}){
   }
   async function hostPublish(){
     const t=now(),gap=1000/(inMatch?rates.match:rates.lobby);
-    if(sendingSt||t-lastSt<gap||closed)return;
+    if(sendingSt||t-lastSt<gap||closed||disposed)return;
     const list=[...peers.values()].filter(p=>p.slot!==null&&p.online);if(!list.length)return;
     if(list.some(p=>callsLeft(p.slot)<=0))return;
     lastSt=t;sendingSt=true;
@@ -124,29 +128,29 @@ function create(sdk,opts={}){
     const minAck=Math.min(...list.map(p=>p.gack));while(log.length&&log[0].g<=minAck)log.shift();
   }
   function hostUpload(){
-    if(closed||uploading||inMatch||now()<uploadAfter)return;
+    if(closed||disposed||uploading||(inMatch&&appearancePolicy==='lobby')||now()<uploadAfter)return;
     const own=ownPayload();if(own)payloads.set(profile.signature,own);
     const need=new Set(hostLobby().players.map(p=>p.signature));
     for(const p of peers.values()){
       if(!p.online||p.slot===null)continue;
       const next=[...need].find(sig=>sig!==p.profile?.signature&&!p.sent.has(sig)&&!p.have.has(sig)&&payloads.has(sig));if(!next)continue;
-      uploading=true;
-      sdk.transfer({to:p.id,purpose,contentType:'application/octet-stream',dataBase64:payloads.get(next)})
-        .then(()=>{p.sent.add(next);lookBytes+=payloads.get(next).length;}).catch(e=>{uploadAfter=now()+2000;note('transfer_error',e.message);if(!TRANSIENT.test(e.message)&&!/asset_timeout/.test(e.message))fail(e);}).finally(()=>{uploading=false;});
+      uploading=true;const data=payloads.get(next);
+      sdk.transfer({...(!pairSession?{to:p.id}:{}),purpose,contentType:'application/octet-stream',dataBase64:data})
+        .then(()=>{if(closed||disposed)return;p.sent.add(next);lookBytes+=data.length;}).catch(e=>{uploadAfter=now()+2000;note('transfer_error',e.message);if(!TRANSIENT.test(e.message)&&!/asset_timeout/.test(e.message))fail(e);}).finally(()=>{uploading=false;});
       return;
     }
   }
   async function hostEvent(e){
-    const from=e.from;
+    const from=pairSession?'pair-peer':e.from;
     if(e.type==='closed'){end(e.reason||'closed');return;}
     if(!from)return;
     if(e.type==='peer_left'){dropPeer(from,'left');return;}
     if(e.type==='disconnected'){const p=peers.get(from);if(p&&p.online){p.online=false;if(p.profile)changed();}return;}
-    if(e.type==='connected'||e.type==='peer_joined'){const p=peer(from);p.online=true;p.lastHeard=now();return;}
+    if(e.type==='connected'||e.type==='peer_joined'){const p=peer(from),wasOnline=p.online;p.online=true;p.lastHeard=now();if(!wasOnline&&p.profile)changed();return;}
     if(e.type==='resync_required'){note('resync',e.reason);return;}
     if(e.type==='transfer'){
       if(e.purpose!==purpose)return;
-      const data=await sdk.readTransfer({transferId:e.transferId});
+      const data=await sdk.readTransfer({transferId:e.transferId});if(closed||disposed)return;
       const value=decodeAsset(data.dataBase64);if(!value||value.v!==1||typeof value.signature!=='string')throw Error('invalid_asset');
       const p=peer(from);p.lastHeard=now();
       // Only the look the guest declared as its own; it may arrive before its hello.
@@ -161,7 +165,7 @@ function create(sdk,opts={}){
       if(p.slot===null){const n=freeSlot();if(n===null){if(!p.full){p.full=true;send(T.pong,{full:true},'pong',from,[]).catch(()=>{});}return;}p.slot=n;p.waiting=inMatch;}
       let pr;try{pr=prefsSpec.validate({...prefsSpec.defaults,...(v.prefs||{})});}catch{pr=p.prefs;}
       const before=JSON.stringify([p.profile,p.prefs,p.ready]);
-      p.profile=prof;p.prefs=pr;p.ready=!!v.ready;
+      p.profile=prof;p.announced.add(prof.signature);p.prefs=pr;p.ready=!!v.ready;
       p.have=new Set(Array.isArray(v.have)?v.have.filter(s=>typeof s==='string').slice(0,8):[]);
       acceptPending(p);
       if(before!==JSON.stringify([p.profile,p.prefs,p.ready]))changed();
@@ -173,6 +177,7 @@ function create(sdk,opts={}){
     if(type===T.ping){send(T.pong,{c:v.c,h:Math.round(now()),slot:p.slot,...(p.full?{full:true}:{})},'pong',from,p.slot===null?[]:[p.slot]).catch(()=>{});return;}
     if(type===T.up&&p.slot!==null){
       let env;try{env=await Wire.unpack(v);}catch{return;}
+      if(disposed||closed)return;
       const k=env&&env.k;if(!k)return;
       if(Number.isSafeInteger(k.gack))p.gack=Math.max(p.gack,Math.min(k.gack,gseq));
       if(Number.isFinite(k.t))addAge(p.slot,now()-k.t);
@@ -188,7 +193,7 @@ function create(sdk,opts={}){
   const knownAssets=new Set();
   const hostNow=()=>host?now():now()+offset;
   async function guestSend(){
-    const t=now();if(connection!=='connected'||closed)return;
+    const t=now();if(connection!=='connected'||closed||disposed)return;
     if(profile&&t-lastHello>=HELLO_MS&&callsLeft(0)>2){lastHello=t;send(T.hello,{profile,prefs:myPrefs,ready,have:[...knownAssets].slice(0,8),kv:VERSION},'hello',undefined,[0]).catch(e=>{if(!TRANSIENT.test(e.message))fail(e);});}
     const pingGap=pings<6||mySlot===null?400:2000; // fast until seated: the seat rides on every pong
     if(t-lastPing>=pingGap&&callsLeft(0)>2){lastPing=t;pings++;send(T.ping,{c:Math.round(t)},'ping',undefined,[0]).catch(()=>{});}
@@ -206,9 +211,10 @@ function create(sdk,opts={}){
     if(e.type==='resync_required'){note('resync',e.reason);return;}
     if(e.type==='transfer'){
       if(e.purpose!==purpose)return;
-      const data=await sdk.readTransfer({transferId:e.transferId});
+      const data=await sdk.readTransfer({transferId:e.transferId});if(closed||disposed)return;
       const value=decodeAsset(data.dataBase64);if(!value||value.v!==1||typeof value.signature!=='string')throw Error('invalid_asset');
-      knownAssets.add(value.signature);try{onAsset(value.signature,value.asset,null);}catch(err){fail(err);}return;
+      if(knownAssets.has(value.signature))return;
+      knownAssets.add(value.signature);const slot=pairSession?0:null;try{onAsset(value.signature,value.asset,slot);}catch(err){fail(err);}return;
     }
     if(e.type!=='message')return;
     const {type,payload:v}=e.message;if(!v||typeof v!=='object')return;
@@ -220,6 +226,7 @@ function create(sdk,opts={}){
     }
     if(type!==T.st)return;
     let env;try{env=await Wire.unpack(v);}catch{return;}
+    if(disposed||closed)return;
     const k=env&&env.k;if(!k)return;
     if(Number.isFinite(k.t))addAge(0,hostNow()-k.t);
     if(k.lob&&k.lob.serial!==remoteLobby.serial){remoteLobby=k.lob;settings=k.lob.settings;inMatch=!!k.lob.inMatch;try{onLobby(api.lobby());}catch(err){fail(err);}}
@@ -234,16 +241,16 @@ function create(sdk,opts={}){
   // A look is sent only while the host's lobby says it does not have it yet, at most 3 times per
   // look: reconnects never resend it (the host keeps every look for the whole session, and the
   // host bridge caps what a session may ever transfer at 8 MB).
-  const attempts=new Map();
+  const attempts=new Map(),sentSignatures=new Set();
   function guestUpload(){
-    if(transferJob||!asset||inMatch||connection!=='connected'||closed||now()<guestUploadAfter||mySlot===null)return;
+    if(transferJob||!asset||(inMatch&&appearancePolicy==='lobby')||connection!=='connected'||closed||disposed||now()<guestUploadAfter||mySlot===null)return;
     const signature=profile.signature;
-    if(sentSignature===signature||(remoteLobby.looks||[]).includes(signature)||(attempts.get(signature)||0)>=3)return;
+    if(sentSignatures.has(signature)||sentSignature===signature||(remoteLobby.looks||[]).includes(signature)||(attempts.get(signature)||0)>=3)return;
     if(remoteLobby.serial<0)return; // wait for the host's first lobby
     const payload=ownPayload();if(!payload){sentSignature=signature;return;}
     attempts.set(signature,(attempts.get(signature)||0)+1);
     transferJob=sdk.transfer({purpose,contentType:'application/octet-stream',dataBase64:payload})
-      .then(()=>{sentSignature=signature;lookBytes+=payload.length;}).catch(e=>{guestUploadAfter=now()+3000;note('transfer_error',e.message);if(!TRANSIENT.test(e.message)&&!/asset_timeout/.test(e.message))fail(e);}).finally(()=>{transferJob=null;});
+      .then(()=>{if(closed||disposed)return;sentSignature=signature;sentSignatures.add(signature);lookBytes+=payload.length;}).catch(e=>{guestUploadAfter=now()+3000;note('transfer_error',e.message);if(!TRANSIENT.test(e.message)&&!/asset_timeout/.test(e.message))fail(e);}).finally(()=>{transferJob=null;});
   }
 
   // =========================== both ===========================
@@ -259,26 +266,28 @@ function create(sdk,opts={}){
     let lastPoll=0;
     while(!disposed&&!closed){
       try{
-        const wait=lastPoll+POLL_GAP-now();if(wait>0)await pause(wait);lastPoll=now();
+        const wait=lastPoll+POLL_GAP-now();if(wait>0)await pause(wait);if(disposed||closed)break;lastPoll=now();
         const b=await sdk.poll({cursor,waitMs:1000});if(disposed||closed)break;
         if(b.epoch!==epoch)epoch=b.epoch; // a reconnect: looks are NOT resent (see guestUpload)
-        for(const e of b.events){if(e.type!=='message')note(e.type,e.reason);try{await(host?hostEvent(e):guestEvent(e));}catch(err){fail(err);}if(closed)break;}
+        for(const e of b.events){if(e.type!=='message')note(e.type,e.reason);try{await(host?hostEvent(e):guestEvent(e));}catch(err){fail(err);}if(closed||disposed)break;}
         cursor=b.cursor;
         if(b.transportState==='closed'){end(closeReason||'closed');break;}
         if(!closed)status(b.transportState);
-      }catch(e){if(/session_closed|caller_disposed|permission_denied|permission_revoked|account_changed/.test(e.message)){end(e.message);break;}status('reconnecting');fail(e);await pause(350);}
+      }catch(e){if(disposed||closed)break;if(/session_closed|caller_disposed|permission_denied|permission_revoked|account_changed/.test(e.message)){end(e.message);break;}status('reconnecting');fail(e);await pause(350);}
     }
   }
   const api={
     VERSION,
     async start(localProfile,localAsset,localPrefs){
+      if(closed||disposed)throw Error('session_closed');
       if(context)throw Error('already_started');
-      context=await sdk.getContext();if(!context)throw Error('no_invitation');
+      context=await sdk.getContext();if(closed||disposed)throw Error('session_closed');if(!context)throw Error('no_invitation');
       if(context.protocol?.id!==protocol.id||context.protocol?.version!==protocol.version)throw Error('protocol_mismatch');
+      pairSession=context.maxPlayers===undefined||context.maxPlayers===2;
       host=context.role==='host';profile=cleanProfile(localProfile);asset=localAsset||null;
       if(localPrefs)myPrefs=prefsSpec.validate({...prefsSpec.defaults,...localPrefs});
       if(host)mySlot=0;
-      const joined=await sdk.join();epoch=joined.epoch;status(joined.status==='connected'?'connected':'waiting');void poll();
+      const joined=await sdk.join();if(closed||disposed)throw Error('session_closed');epoch=joined.epoch;status(joined.status==='connected'?'connected':'waiting');if(closed||disposed)throw Error('session_closed');void poll();
       if(host){timers.push(setInterval(()=>void hostPublish(),10),setInterval(hostUpload,200),
         setInterval(()=>{for(const p of peers.values())if(p.online&&now()-p.lastHeard>STALE_MS){p.online=false;if(p.profile)changed();}},500));changed();}
       else timers.push(setInterval(()=>void guestSend(),10),setInterval(guestUpload,200));
@@ -297,8 +306,8 @@ function create(sdk,opts={}){
     setPrefs(p){myPrefs=prefsSpec.validate({...myPrefs,...p});lastHello=0;if(host)changed();},
     setReady(v){ready=!!v;lastHello=0;if(host)changed();},
     setSettings(s){if(!host)throw Error('host_only');settings=settingsSpec.validate({...settings,...s});changed();},
-    // Host: the match has started (true) or returned to the lobby (false). Looks travel only in
-    // the lobby; seats taken during a match are marked `waiting`.
+    // Host: the match has started (true) or returned to the lobby (false). Looks follow
+    // appearancePolicy; seats taken during a match are marked `waiting`.
     setMatch(v){if(!host)throw Error('host_only');inMatch=!!v;if(!inMatch)for(const p of peers.values())p.waiting=false;changed();},
     // Host: seats a waiting player into the match (the game decides when).
     seat(slot){for(const p of peers.values())if(p.slot===slot&&p.waiting){p.waiting=false;changed();}},
