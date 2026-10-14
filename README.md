@@ -71,6 +71,16 @@ PET_HOST_ROOT=/absolute/path/to/host npm test
 
 `test/room-appearance.test.cjs` 验证默认大厅策略、连续换形象、在途更新、缓存重连与销毁边界。`test/vendor.test.cjs` 验证独立副本可校验，以及篡改与内部导入确实被拒绝；两者均纳入 `npm test`。
 
+### 0.2.1 异步游戏状态
+
+`hostState`、`guestState` 与 `onState` 可返回 Promise，Room 串行等待；关闭、销毁或 epoch/resync 改变会废弃仍在准备的发送。`onStateSent(state)` 只在该状态被 SDK 接受且生命周期仍有效时调用，不能当作对端应用确认。游戏差分必须继续使用对端应用后的 ACK。
+
+`onReset({reason,epoch})` 在处理新 epoch 或 resync 事件时通知游戏清理基线；通知先于该批状态应用。`flushState()` 请求按既有间隔和预算刷新，不绕过限速。`guestState` 显式返回 `undefined` 可抑制无变化的应用心跳，但事件重传/确认仍发送；默认 `null` 保留原速率。高频游戏可明确设 `budget.callsPerSecond`（1–28，默认25，预留宿主30次上限的余量）。
+
+`pollGapMs` 默认40ms；实时游戏可以显式选0，继续使用 SDK 的1000ms长等待而不再增加轮询后的固定缓冲。消息仍遵守发送预算，不能换成空结果忙轮询的非正式 SDK。
+
+形象仅在未收到签名确认且经过8秒时补传，最多再试两次；已经确认的签名跨重连保留缓存。`stats().ownSentSignature` 是当前形象的接收签名确认，不是仅排队成功。具名 `test:state` 验证异步/关闭/重置/空闲输入与素材补传，纳入 `npm test`。这些是内嵌游戏库能力，没有新增宿主 SDK 权限或方法。
+
 `test/fake-sessions.cjs` 是严格的模拟宿主：直接加载宿主源码里的 `contracts.js` 做校验（找不到时用简化版），并模拟每秒 30 次 / 512 KB 的固定窗口、latest 30 ms 合并、8 个 key、reliable 1024 条、每次收取 64 KB、形象一次一个且 10 秒超时，以及链路延迟、丢包和限速排队。游戏的联机测试也用它。
 
 本轮候选范围及证据见 [0.2.0 验收记录](docs/internet-play-validation.md)。

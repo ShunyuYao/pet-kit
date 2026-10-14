@@ -1,5 +1,13 @@
 # pet-kit 更新说明
 
+## 0.2.1（未发布候选，2026-10-14）
+
+- 状态提供和应用支持 Promise，增加成功 SDK send 后的 onStateSent、epoch / resync 的 onReset、受原预算约束的 flushState；关闭或重置使旧的异步状态失效。
+- 可配置 callsPerSecond（1–28）和 pollGapMs（默认40，0保留 SDK 长轮询），支持高速游戏保留原同步节奏。
+- guestState 返回 undefined 可抑制空闲游戏流，事件重发和确认仍发送；既有 null 默认不变。
+- ownSentSignature 只在接收端宣告已缓存形象后出现；房主未收到素材确认时最多补传两次，已确认素材跨重连保留。
+- 作用于游戏内嵌公共库，不新增宿主 SDK 或改变游戏裁定/预测算法；双人及多人分别验收。
+
 ## 0.2.0（未发布候选，2026-10-12）
 
 - Room 兼容真实双人 sessions：按宿主 context 区分双人和多人，双人不发送房间寻址字段，不要求事件带 from。多人默认 API 不变。
