@@ -21,9 +21,9 @@ function vendor(gameDir){
 function check(gameDir){
   const bad=[];
   const walk=d=>{for(const e of fs.readdirSync(d,{withFileTypes:true})){const p=path.join(d,e.name);if(e.isDirectory()){if(!['vendor','node_modules','dist','artifacts','.git'].includes(e.name))walk(p);}
-    else if(/\.(c?js|mjs)$/.test(e.name)){const src=fs.readFileSync(p,'utf8');for(const m of src.matchAll(/(?:require\(|from\s+)['"]([^'"]*pet-kit[^'"]*)['"]/g))if(!/pet-kit\/((index|looks)(\.js)?|verify\.cjs|testing\/fake-sessions\.cjs)$/.test(m[1]))bad.push(path.relative(gameDir,p)+' → '+m[1]);}}};
+    else if(/\.(c?js|mjs)$/.test(e.name)){const src=fs.readFileSync(p,'utf8');for(const m of src.matchAll(/(?:require\(|from\s+)['"]([^'"]*pet-kit[^'"]*)['"]/g))if(!/pet-kit\/((index|looks|motion)(\.js)?|verify\.cjs|testing\/fake-sessions\.cjs)$/.test(m[1]))bad.push(path.relative(gameDir,p)+' → '+m[1]);}}};
   walk(gameDir);
-  if(bad.length)throw Error('pet-kit internals imported (use vendor/pet-kit/index.js or looks.js):\n  '+bad.join('\n  '));
+  if(bad.length)throw Error('pet-kit internals imported (use vendor/pet-kit/index.js or looks.js / motion.js):\n  '+bad.join('\n  '));
   const v=JSON.parse(fs.readFileSync(path.join(gameDir,'vendor/pet-kit/VERSION.json'),'utf8'));
   for(const [f,h] of Object.entries(v.files))/* src files only */if(crypto.createHash('sha256').update(fs.readFileSync(path.join(gameDir,'vendor/pet-kit',f))).digest('hex')!==h)throw Error('vendor/pet-kit/'+f+' was edited in the game; change pet-kit and re-vendor instead');
   return v.version;

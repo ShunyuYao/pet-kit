@@ -1,6 +1,6 @@
 {
   "name": "pet-kit",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Shared room / transport / looks layer for invitation-based pet HTML games.",
   "license": "MIT",
@@ -11,6 +11,7 @@
     "test:host": "node --test test/room-host.test.cjs",
     "test:appearance": "node --test test/room-appearance.test.cjs",
     "test:vendor": "node --test test/vendor.test.cjs",
-    "test:state": "node --test test/room-async-state.test.cjs"
+    "test:state": "node --test test/room-async-state.test.cjs",
+    "test:motion": "node --test test/motion.test.cjs"
   }
 }

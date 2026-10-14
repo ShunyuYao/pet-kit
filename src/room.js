@@ -17,7 +17,7 @@
 //                                              host → guest kit.pong · kit.st
 const Wire=require('./wire.js');
 
-const VERSION='0.2.1';
+const VERSION='0.3.0';
 const T={hello:'kit.hello',ping:'kit.ping',pong:'kit.pong',up:'kit.up',st:'kit.st'};
 const HELLO_MS=1000,STALE_MS=3000,POLL_GAP=40,LOBBY_EVERY_MS=1000,CALLS_SOFT=25,BYTES_SOFT=480*1024; // host limits: 30 calls/lane and 512 KB per session per second
 const MAX_EVENTS=200,MAX_EVENT_CHARS=24000,LOG_CAP=4000,AGE_SAMPLES=240;

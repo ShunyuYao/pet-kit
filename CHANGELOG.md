@@ -1,5 +1,13 @@
 # pet-kit 更新说明
 
+## 0.3.0（2026-10-14）
+
+- 新增独立 Motion 公共入口：原始模拟时间、有界缓存、批次收包插值、显式有限外推、重置和诊断，不改 Room 协议或默认行为。
+- 游戏值与采样值隔离，重复/过期样本丢弃，长时间停顿重建基线；游戏负责生命周期和权威状态。
+- 赛车、颜料、食堂、矿工逐个固定版本并验收，不批量强制升级其他游戏。
+- Added opt-in Motion presentation buffering with original timestamps, bounded history/projection, lifecycle reset and diagnostics. Existing Room behavior is unchanged.
+
+
 ## 0.2.1（未发布候选，2026-10-14）
 
 - 状态提供和应用支持 Promise，增加成功 SDK send 后的 onStateSent、epoch / resync 的 onReset、受原预算约束的 flushState；关闭或重置使旧的异步状态失效。

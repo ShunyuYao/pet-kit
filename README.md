@@ -51,7 +51,7 @@ Room 按 `getContext().maxPlayers` 选择宿主 API：缺省或 `2` 是双人会
 node ../pet-kit/scripts/vendor.cjs ../pet-bomb   # 把当前版本拷进 pet-bomb/vendor/pet-kit/
 ```
 
-导出同时写入 `VERSION.json`（版本及源码摘要）和独立校验器。游戏构建调用 `require('../vendor/pet-kit/verify.cjs').check(gameDir)`，只依赖本仓库固定副本，不需要同级目录的最新 pet-kit。游戏代码只能引用 `index.js`、`looks.js` 和测试用的 `testing/fake-sessions.cjs`；构建脚本可调用 `verify.cjs`。副本被修改或业务代码引用内部模块会使构建失败，必须回到 pet-kit 修改并重新导出。
+导出同时写入 `VERSION.json`（版本及源码摘要）和独立校验器。游戏构建调用 `require('../vendor/pet-kit/verify.cjs').check(gameDir)`，只依赖本仓库固定副本，不需要同级目录的最新 pet-kit。游戏代码只能引用 `index.js`、`looks.js`、`motion.js` 和测试用的 `testing/fake-sessions.cjs`；构建脚本可调用 `verify.cjs`。副本被修改或业务代码引用内部模块会使构建失败，必须回到 pet-kit 修改并重新导出。
 
 ## 版本规则
 
@@ -86,3 +86,30 @@ PET_HOST_ROOT=/absolute/path/to/host npm test
 本轮候选范围及证据见 [0.2.0 验收记录](docs/internet-play-validation.md)。
 
 MIT License.
+
+## 0.3.0 运动呈现 / Motion presentation
+
+`Motion` 是独立的显示缓冲，不自动启用，也不依赖 Room。已有房间、权限和发送节奏保持原样。使用整包的 `require('./vendor/pet-kit/index.js').Motion`，或仅使用 `require('./vendor/pet-kit/motion.js')`，避免把不需要的房间代码打入游戏。
+
+```js
+const Motion = require('./vendor/pet-kit/motion.js');
+const remote = Motion.create({
+  delayMs: 150,
+  interpolate: (a, b, f) => ({x: a.x + (b.x - a.x) * f}),
+});
+// 收到一个经过游戏校验的样本。sampleMs 是产生位置的模拟时钟。
+remote.push({time: packet.sampleMs, key: packet.round, value: packet.pose}, performance.now());
+// 每个绘制帧；只把结果交给绘图，不写回碰撞或计分状态。
+const visualPose = remote.sample(performance.now());
+```
+
+- `time` 是有限的毫秒数，在同一 `key` 内严格递增。两次收到同一位置样本，必须保留同一个 `time`；转发者不能改成转发时刻。`receivedAt` 与 `sample(now)` 使用接收端同一个单调时钟。各玩家用独立缓冲，不把不同来源的时钟混在一起。
+- `key` 使用稳定的原始值（如局号/阶段字符串）。换局、换轨、重新拥有控制权、暂停恢复、复活、传送等由游戏主动 `reset()` 或改变 `key`；游戏必须先拒绝旧局消息，再推入缓冲。库不知道局号的新旧顺序。
+- 默认 `delayMs=100`、`capacity=32`、`resetAfterMs=1000`、`maxProjectionMs=0`。容量可设 2–512，空缓冲返回 `null`；一个样本只保持原位。超过一秒的收包空窗重设时间基线。暂停时游戏应停止采样或显式重置，不能靠重复的时间戳维持动画。
+- `interpolate(a,b,f,spanMs)` 只描述连续字段。可选 `project(a,b,aheadMs,spanMs)` 仅在显式设置 `maxProjectionMs>0` 时启用，`aheadMs` 永远不超过该上限；到达上限后冻结。边界、角度、碰撞、回收位置等由游戏自己约束。`discontinuous(a,b,spanMs)` 返回 true 会直接选 b，禁止穿过传送或离散动作。
+- 输入、历史和返回值隔离复制；只接收可 structuredClone 的值。重复/过期时间丢弃，队列有上限。`stats()` 返回 frames、dropped、resets、mode、lastSampleTime、lastReceived；mode 有 empty / buffering / interpolating / discontinuous / projecting / exhausted。这里没有网络 RTT、丢包率或玩法错误的推断。
+- 自己操作的角色不应套远端缓冲延迟；本地预测、输入确认、回滚重演、服务器纠偏均归游戏处理。房间重连、实体生命周期与物理世界也仍归游戏。
+
+接入顺序：先真实复现 → 给位置定义原始时间和生命周期 → 固定 vendor → 单独适配绘制层 → 验证自己/对方、普通/批次收包、动作边界及完整玩法 → 更新游戏产物、宿主清单和缓存。当前迁移赛车、颜料、食堂、矿工，其他游戏继续固定它们原有版本，不会因库更新自动改变行为。
+
+English contract: Motion is an opt-in, transport-independent presentation buffer. Supply original simulation timestamps in milliseconds, keep them unchanged when relaying, and use one monotonic receiver clock for push/sample. Use separate buffers per clock/actor. The game owns authority, prediction, collisions, discontinuities and stale-generation rejection. Reset on lifecycle transitions. Values and callback arguments are cloned, history is bounded, duplicates are rejected, and extrapolation is disabled unless explicitly supplied and bounded. Never write sampled poses back into the simulation. The two CommonJS public imports above expose the same implementation. `npm run test:motion` belongs to `npm test`; game E2E remains mandatory.
