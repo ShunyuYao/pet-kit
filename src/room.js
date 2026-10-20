@@ -15,9 +15,9 @@
 // messages can be coalesced or dropped, so events carry sequence numbers and are repeated
 // until acknowledged. Keys (≤ 8 per session): guest → host  kit.hello · kit.ping · kit.up
 //                                              host → guest kit.pong · kit.st
-const Wire=require('./wire.js');
+const Wire=require('./wire.js'),AssetCodec=require('./asset-codec.js');
 
-const VERSION='0.3.0';
+const VERSION='0.3.1';
 const T={hello:'kit.hello',ping:'kit.ping',pong:'kit.pong',up:'kit.up',st:'kit.st'};
 const HELLO_MS=1000,STALE_MS=3000,POLL_GAP=40,LOBBY_EVERY_MS=1000,CALLS_SOFT=25,BYTES_SOFT=480*1024; // host limits: 30 calls/lane and 512 KB per session per second
 const MAX_EVENTS=200,MAX_EVENT_CHARS=24000,LOG_CAP=4000,AGE_SAMPLES=240;
@@ -31,10 +31,10 @@ function cleanProfile(p){
 }
 const pct=(arr,q)=>{if(!arr.length)return null;const s=arr.slice().sort((a,b)=>a-b);return s[Math.min(s.length-1,Math.floor(q*s.length))];};
 const encodeAsset=v=>Wire.toB64(new TextEncoder().encode(JSON.stringify(v)));
-const decodeAsset=s=>{if(typeof s!=='string'||s.length>MAX_ASSET_B64)throw Error('invalid_asset');return JSON.parse(new TextDecoder().decode(Wire.fromB64(s)));};
+const decodeAsset=AssetCodec.decode;
 
 function create(sdk,opts={}){
-  const {protocol,purpose='kit.look.v1',maxPlayers=4,appearancePolicy='lobby',now=()=>Date.now(),strict=false,compress=true,pollGapMs=POLL_GAP,
+  const {protocol,purpose='kit.look.v1',maxPlayers=4,appearancePolicy='lobby',now=()=>Date.now(),strict=false,compress=true,assetCompression=false,pollGapMs=POLL_GAP,
     rates={match:20,lobby:5,up:20},budget={guestBytesPerSec:null},
     prefs:prefsSpec={defaults:{},validate:v=>v||{}},settings:settingsSpec={defaults:{},validate:v=>v||{}},
     hostState=()=>null,guestState=()=>null,
@@ -161,7 +161,7 @@ function create(sdk,opts={}){
     if(e.type==='transfer'){
       if(e.purpose!==purpose)return;
       const data=await sdk.readTransfer({transferId:e.transferId});if(closed||disposed)return;
-      const value=decodeAsset(data.dataBase64);if(!value||value.v!==1||typeof value.signature!=='string')throw Error('invalid_asset');
+      const value=await decodeAsset(data.dataBase64);if(closed||disposed)return;if(!value||value.v!==1||typeof value.signature!=='string')throw Error('invalid_asset');
       const p=peer(from);p.lastHeard=now();
       // Only the look the guest declared as its own; it may arrive before its hello.
       p.pending={signature:value.signature,data:data.dataBase64,asset:value.asset};acceptPending(p);return;
@@ -232,7 +232,7 @@ function create(sdk,opts={}){
     if(e.type==='transfer'){
       if(e.purpose!==purpose)return;
       const data=await sdk.readTransfer({transferId:e.transferId});if(closed||disposed)return;
-      const value=decodeAsset(data.dataBase64);if(!value||value.v!==1||typeof value.signature!=='string')throw Error('invalid_asset');
+      const value=await decodeAsset(data.dataBase64);if(closed||disposed)return;if(!value||value.v!==1||typeof value.signature!=='string')throw Error('invalid_asset');
       if(knownAssets.has(value.signature))return;
       knownAssets.add(value.signature);const slot=pairSession?0:null;try{onAsset(value.signature,value.asset,slot);}catch(err){fail(err);}return;
     }
@@ -267,7 +267,7 @@ function create(sdk,opts={}){
     const signature=profile.signature;
     if(sentSignatures.has(signature)||sentSignature===signature||(remoteLobby.looks||[]).includes(signature)||(attempts.get(signature)||0)>=3)return;
     if(remoteLobby.serial<0)return; // wait for the host's first lobby
-    const payload=ownPayload();if(!payload){sentSignature=signature;return;}
+    const payload=ownPayload();if(payload===undefined)return;if(!payload){sentSignature=signature;return;}
     attempts.set(signature,(attempts.get(signature)||0)+1);
     transferJob=sdk.transfer({purpose,contentType:'application/octet-stream',dataBase64:payload})
       .then(()=>{if(closed||disposed)return;sentSignature=signature;sentSignatures.add(signature);lookBytes+=payload.length;}).catch(e=>{guestUploadAfter=now()+3000;note('transfer_error',e.message);if(!TRANSIENT.test(e.message)&&!/asset_timeout/.test(e.message))fail(e);}).finally(()=>{transferJob=null;});
@@ -278,6 +278,13 @@ function create(sdk,opts={}){
   function ownPayload(){
     if(!asset||!profile)return null;
     if(ownCache.signature===profile.signature&&ownCache.asset===asset)return ownCache.data;
+    if(assetCompression){
+      const cache={signature:profile.signature,asset,data:undefined};ownCache=cache;
+      AssetCodec.encode({v:1,signature:cache.signature,asset:cache.asset}).then(data=>{
+        if(ownCache===cache&&!closed&&!disposed)cache.data=data;
+      },e=>{if(ownCache===cache&&!closed&&!disposed){cache.data=null;fail(e);}});
+      return undefined;
+    }
     let data=encodeAsset({v:1,signature:profile.signature,asset});if(data.length>MAX_ASSET_B64){fail(Error('asset_too_large'));data=null;}
     ownCache={signature:profile.signature,asset,data};return data;
   }

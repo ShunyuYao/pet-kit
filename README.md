@@ -113,3 +113,11 @@ const visualPose = remote.sample(performance.now());
 接入顺序：先真实复现 → 给位置定义原始时间和生命周期 → 固定 vendor → 单独适配绘制层 → 验证自己/对方、普通/批次收包、动作边界及完整玩法 → 更新游戏产物、宿主清单和缓存。当前迁移赛车、颜料、食堂、矿工，其他游戏继续固定它们原有版本，不会因库更新自动改变行为。
 
 English contract: Motion is an opt-in, transport-independent presentation buffer. Supply original simulation timestamps in milliseconds, keep them unchanged when relaying, and use one monotonic receiver clock for push/sample. Use separate buffers per clock/actor. The game owns authority, prediction, collisions, discontinuities and stale-generation rejection. Reset on lifecycle transitions. Values and callback arguments are cloned, history is bounded, duplicates are rejected, and extrapolation is disabled unless explicitly supplied and bounded. Never write sampled poses back into the simulation. The two CommonJS public imports above expose the same implementation. `npm run test:motion` belongs to `npm test`; game E2E remains mandatory.
+
+## Appearance compression (0.3.1)
+
+`Room.create(sdk, {assetCompression: true, ...})` opts a game into lossless gzip of the entire appearance envelope. The default remains legacy JSON. Updated rooms read both encodings; use the same pinned kit/artifact on all peers. `Assets.encode(value)` / `Assets.decode(base64)` expose the same bounded codec for a game to choose its image-quality budget before publishing a profile.
+
+Actual transfer bytes remain at most 1 MiB. Decoded JSON is bounded to 4 MiB and decompression stops at that limit. Compression runs once per immutable appearance/signature without holding up state/input traffic. Superseded, closed or disposed encodes cannot publish stale assets. Games still own frame counts, image quality, profile validation and reaction semantics.
+
+Verification: `PET_HOST_ROOT=/absolute/host npm test` covers the real host SDK size bound, legacy input, exact round trips and oversized/corrupt compressed input. The fix was triggered by full reaction sets exceeding 1 MiB when retaining clear frames; shrinking frame dimensions was masking that boundary.

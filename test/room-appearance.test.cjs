@@ -84,3 +84,14 @@ test('reconnected peer is published online even when its next hello is unchanged
  assert.equal(rooms[0].lobby().players.find(p=>p.slot===1).online,true);
  assert.equal(lobbies.at(-1).players.find(p=>p.slot===1).online,true,'lobby callback must follow real online state');
 });
+
+test('compressed appearance codec preserves JSON, reads legacy assets, and bounds decoded size',async()=>{
+ const C=require('../src/asset-codec'),{gzipSync}=require('node:zlib');
+ const value={v:1,signature:'clear',asset:{frames:Array(96).fill('data:image/webp;base64,'+'A'.repeat(16000))}};
+ const bytes=await C.encode(value);assert(Buffer.from(bytes,'base64').length<1024*1024);assert.deepEqual(await C.decode(bytes),value);
+ assert.deepEqual(await C.decode(Buffer.from(JSON.stringify({old:true})).toString('base64')),{old:true});
+ await assert.rejects(C.encode({oversized:'x'.repeat(C.MAX_RAW)}),/asset_too_large/);
+ await assert.rejects(C.decode(gzipSync(Buffer.alloc(C.MAX_RAW+1,32)).toString('base64')),/asset_too_large/);
+ await assert.rejects(C.decode(Buffer.alloc(C.MAX_PACKED+1).toString('base64')),/invalid_asset|asset_too_large/);
+ await assert.rejects(C.decode('H4sIAA=='));
+});

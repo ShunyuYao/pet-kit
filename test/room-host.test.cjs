@@ -35,3 +35,14 @@ test('two-player Room interoperates with real manager/SDK without room targets o
   assert(p.calls.every(c=>!Object.hasOwn(c.arg,'to')),'two-player SDK rejects room addressing');
   assert.deepEqual(errors,[]);
 });
+
+test('opt-in appearance compression delivers a clear multi-action asset beyond 1MiB JSON through the real bounded SDK',async t=>{
+ const {sdks,calls}=pair(t),received=[],errors=[];
+ const asset={frames:Array.from({length:96},(_,i)=>'data:image/webp;base64,'+Buffer.alloc(14000,i).toString('base64'))};
+ assert(Buffer.byteLength(JSON.stringify(asset))>1024*1024);
+ const rooms=sdks.map((sdk,i)=>Room.create(sdk,{protocol,maxPlayers:2,assetCompression:true,onAsset:(sig,a)=>received.push({sig,a}),onError:e=>errors.push(e.message)}));t.after(()=>rooms.forEach(r=>r.dispose()));
+ await rooms[0].start({signature:'clear-A'},{body:'A'});await rooms[1].start({signature:'clear-B'},asset);
+ await until(()=>received.some(r=>r.sig==='clear-B'),'full clear appearance reaches peer');
+ assert.deepEqual(received.find(r=>r.sig==='clear-B').a,asset);assert.deepEqual(errors,[]);
+ assert(calls.filter(c=>c.method==='transfer').every(c=>Buffer.from(c.arg.dataBase64,'base64').length<=1024*1024));
+});
